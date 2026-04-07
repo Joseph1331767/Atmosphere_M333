@@ -28,11 +28,19 @@ uniform sunEmittance: f32;
 uniform sunColor: vec3<f32>;
 uniform radii: vec2<f32>;
 
-var skyViewTexture: texture_2d<f32>;
+var skyViewTexture: texture_2d<f32>; 
 var transmittanceTexture: texture_2d<f32>;
 
 fn interleavedGradientNoise(n: vec2<f32>) -> f32 {
     return fract(52.9829189 * fract(dot(n, vec2<f32>(0.06711056, 0.00583715))));
+}
+
+fn animatedIGN(coord: vec2<f32>, frameTime: f32) -> f32 {
+    let angle = frameTime * 2.399963229; // golden angle rotation per frame
+    let c = cos(angle);
+    let s = sin(angle);
+    let rotated = vec2<f32>(c * coord.x - s * coord.y, s * coord.x + c * coord.y);
+    return fract(52.9829189 * fract(dot(rotated, vec2<f32>(0.06711056, 0.00583715))));
 }
 
 fn hash(p: vec3<f32>) -> f32 {
@@ -102,7 +110,7 @@ fn getTransmittance(r: f32, mu: f32) -> vec3<f32> {
     return sampleTransmittanceBilinear(vec2<f32>(u, v));
 }
 
-fn evaluateAurora(pos: vec3<f32>, rayDir: vec3<f32>) -> vec3<f32> {
+fn evaluateAurora(pos: vec3<f32>, rayDir: vec3<f32>, jitter: f32) -> vec3<f32> {
     let planetRadius = uniforms.radii.x;
     let alt = length(pos) - planetRadius;
     
@@ -149,18 +157,21 @@ fn evaluateAurora(pos: vec3<f32>, rayDir: vec3<f32>) -> vec3<f32> {
     let latFactor = smoothstep(auroraWidth, 0.0, latDist);
     if (latFactor <= 0.0) { return vec3<f32>(0.0); }
     
+    // Per-pixel grid-breaking offset - prevents noise grid from showing as horizontal bands
+    let gridBreak = (jitter - 0.5) * 0.4;
+    
     // 2. MAG: Speed dilation and Turbulence
     let timeScaled = uniforms.time * mix(0.02, 0.3, mag);
     
     // Domain warping (Chaos)
-    let warpNoise = noise(vec3<f32>(longitude * 3.0, latitude * 3.0, timeScaled * 0.5));
+    let warpNoise = noise(vec3<f32>(longitude * 3.0 + gridBreak * 0.1, latitude * 3.0 + gridBreak * 0.1, timeScaled * 0.5));
     let warpedLong = longitude + warpNoise * mix(0.2, 2.0, mag);
     
     let curtainFreq = mix(6.0, 25.0, mag);
-    let n1 = noise(vec3<f32>(warpedLong * curtainFreq, timeScaled, 0.0));
-    let n2 = noise(vec3<f32>(warpedLong * curtainFreq * 2.0 - timeScaled, timeScaled * 1.5, 0.0));
+    let n1 = noise(vec3<f32>(warpedLong * curtainFreq, timeScaled, gridBreak * 0.5));
+    let n2 = noise(vec3<f32>(warpedLong * curtainFreq * 2.0 - timeScaled, timeScaled * 1.5, gridBreak * 0.5));
     
-    let bandNoise = noise(vec3<f32>(latitude * 20.0, warpedLong * 5.0, timeScaled));
+    let bandNoise = noise(vec3<f32>(latitude * 20.0 + gridBreak * 0.3, warpedLong * 5.0, timeScaled + gridBreak * 0.1));
     let bandFactor = smoothstep(mix(0.4, 0.0, mag), 0.6, bandNoise);
     
     let curtainShape = smoothstep(0.3, 0.7, n1 * 0.6 + n2 * 0.4) * bandFactor;
@@ -168,7 +179,7 @@ fn evaluateAurora(pos: vec3<f32>, rayDir: vec3<f32>) -> vec3<f32> {
     // Rays (emerge as mag increases)
     let rayIntensity = smoothstep(0.2, 0.7, mag);
     let rayFreq = mix(60.0, 250.0, mag);
-    let rayNoise = noise(vec3<f32>(warpedLong * rayFreq - timeScaled * 10.0, latitude * 10.0, 0.0));
+    let rayNoise = noise(vec3<f32>(warpedLong * rayFreq - timeScaled * 10.0, latitude * 10.0 + gridBreak * 0.2, gridBreak * 0.3));
     let rays = mix(1.0, smoothstep(0.3, 1.0, rayNoise), rayIntensity);
     
     // Chorus Waves (fast ripples on bottom edge, high mag)
@@ -181,7 +192,7 @@ fn evaluateAurora(pos: vec3<f32>, rayDir: vec3<f32>) -> vec3<f32> {
     // Substorm Pulsations (global flashing, peak mag)
     let pulsationIntensity = smoothstep(0.8, 1.0, mag);
     let pulseSlow = sin(timeScaled * 3.0 + longitude * 2.0) * 0.5 + 0.5;
-    let pulseFast = noise(vec3<f32>(longitude * 10.0, latitude * 10.0, timeScaled * 20.0));
+    let pulseFast = noise(vec3<f32>(longitude * 10.0, latitude * 10.0 + gridBreak * 0.15, timeScaled * 20.0));
     let pulsation = mix(1.0, pulseSlow * pulseFast * 3.0, pulsationIntensity);
     
     // Day/Night (Sunward vs Anti-Sunward)
@@ -191,7 +202,7 @@ fn evaluateAurora(pos: vec3<f32>, rayDir: vec3<f32>) -> vec3<f32> {
     let nightStructure = curtainShape * (0.4 + 0.6 * rays) * chorusRipple * pulsation;
     
     // Day Side Coronal Airglow
-    let dayHazeNoise = noise(vec3<f32>(longitude * 5.0, latitude * 5.0, timeScaled * 5.0));
+    let dayHazeNoise = noise(vec3<f32>(longitude * 5.0, latitude * 5.0 + gridBreak * 0.1, timeScaled * 5.0));
     let dayStructure = smoothstep(0.2, 0.8, dayHazeNoise) * smoothstep(0.4, 1.0, hNorm);
     
     let structure = mix(nightStructure, dayStructure, isDay);
@@ -284,6 +295,10 @@ fn main(input: FragmentInputs) -> FragmentOutputs {
     
     var color = sampleSkyViewBilinear(vec2<f32>(u, v));
     
+    // Per-pixel animated jitter for ray-march and aurora noise grid breaking
+    let jitterCoord = (input.vClipPos.xy / input.vClipPos.w) * vec2<f32>(1920.0, 1080.0);
+    let rayJitter = animatedIGN(jitterCoord, uniforms.time);
+    
     // Raymarch aurora
     if (uniforms.magneticInteraction > 0.0 || uniforms.effectIntensity > 0.0) {
         let planetRadius = uniforms.radii.x;
@@ -302,12 +317,12 @@ fn main(input: FragmentInputs) -> FragmentOutputs {
             if (tMax > tMin) {
                 let numSamples = 16u;
                 let dt = (tMax - tMin) / f32(numSamples);
-                var tCurrent = tMin + dt * 0.5;
+                var tCurrent = tMin + dt * rayJitter;
                 var totalAurora = vec3<f32>(0.0);
                 
                 for (var i = 0u; i < numSamples; i = i + 1u) {
                     let samplePos = rayOrigin + rayDir * tCurrent;
-                    totalAurora += evaluateAurora(samplePos, rayDir) * dt * 0.00001; // scale down dt
+                    totalAurora += evaluateAurora(samplePos, rayDir, rayJitter) * dt * 0.00001; // scale down dt
                     tCurrent += dt;
                 }
                 
@@ -325,9 +340,7 @@ fn main(input: FragmentInputs) -> FragmentOutputs {
     let mappedColor = vec3<f32>(1.0) - exp(-color * uniforms.cameraExposure);
     
     // Dithering
-    let screenPos = input.vClipPos.xy / input.vClipPos.w;
-    let ditherCoord = screenPos * vec2<f32>(1920.0, 1080.0);
-    let ditherNoise = interleavedGradientNoise(ditherCoord);
+    let ditherNoise = animatedIGN(jitterCoord, uniforms.time * 6.0);
     let ditheredColor = mappedColor + vec3<f32>((ditherNoise - 0.5) / 255.0);
     
     fragmentOutputs.color = vec4<f32>(ditheredColor, 1.0);
